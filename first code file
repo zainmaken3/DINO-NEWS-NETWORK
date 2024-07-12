@@ -1,0 +1,148 @@
+Smart Contract Code (programs/dino_news_network/src/lib.rs)
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Mint, TokenAccount, Transfer, MintTo};
+
+declare_id!("YourProgramIDHere");
+
+#[program]
+pub mod dino_news_network {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>, total_supply: u64) -> ProgramResult {
+        // Mint the total supply to the user's token account
+        let cpi_accounts = MintTo {
+            mint: ctx.accounts.mint.to_account_info(),
+            to: ctx.accounts.token_account.to_account_info(),
+            authority: ctx.accounts.mint_authority.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        token::mint_to(cpi_ctx, total_supply)?;
+
+        // Renounce mint authority
+        token::set_authority(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                token::SetAuthority {
+                    account_or_mint: ctx.accounts.mint.to_account_info(),
+                    current_authority: ctx.accounts.mint_authority.to_account_info(),
+                },
+            ),
+            spl_token::instruction::AuthorityType::MintTokens,
+            None,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn transfer_with_liquidity(ctx: Context<TransferWithLiquidity>, amount: u64) -> ProgramResult {
+        let liquidity_amount = amount * 3 / 100;
+        let transfer_amount = amount - liquidity_amount;
+
+        // Transfer 3% to the liquidity pool
+        token::transfer(ctx.accounts.into_liquidity_context(), liquidity_amount)?;
+
+        // Transfer remaining amount to the recipient
+        token::transfer(ctx.accounts.into_transfer_context(), transfer_amount)?;
+
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, payer = user, mint::decimals = 9, mint::authority = mint_authority)]
+    pub mint: Account<'info, Mint>,
+    #[account(init, payer = user, associated_token::mint = mint, associated_token::authority = user)]
+    pub token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub mint_authority: AccountInfo<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct TransferWithLiquidity<'info> {
+    #[account(mut)]
+    pub from: Signer<'info>,
+    #[account(mut)]
+    pub to: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub liquidity_pool: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
+impl<'info> TransferWithLiquidity<'info> {
+    fn into_liquidity_context(&self) -> CpiContext<'_, '_, '_, 'info, Transfer<'info>> {
+        let cpi_accounts = Transfer {
+            from: self.from.to_account_info().clone(),
+            to: self.liquidity_pool.to_account_info().clone(),
+            authority: self.from.to_account_info().clone(),
+        };
+        CpiContext::new(self.token_program.to_account_info().clone(), cpi_accounts)
+    }
+
+    fn into_transfer_context(&self) -> CpiContext<'_, '_, '_, 'info, Transfer<'info>> {
+        let cpi_accounts = Transfer {
+            from: self.from.to_account_info().clone(),
+            to: self.to.to_account_info().clone(),
+            authority: self.from.to_account_info().clone(),
+        };
+        CpiContext::new(self.token_program.to_account_info().clone(), cpi_accounts)
+    }
+}
+JavaScript Initialization Script (initialize_token.js)
+const { Connection, PublicKey, clusterApiUrl, Keypair } = require("@solana/web3.js");
+const { Program, Provider, web3 } = require("@project-serum/anchor");
+const { TOKEN_PROGRAM_ID, createMint, getOrCreateAssociatedTokenAccount, mintTo, setAuthority, AuthorityType } = require("@solana/spl-token");
+
+const idl = JSON.parse(require("fs").readFileSync("./target/idl/dino_news_network.json", "utf8"));
+const programID = new PublicKey("YourProgramIDHere");
+
+const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+const wallet = Keypair.generate();
+const provider = new Provider(connection, wallet, { preflightCommitment: "confirmed" });
+const program = new Program(idl, programID, provider);
+
+(async () => {
+    const mint = await createMint(
+        connection,
+        wallet,
+        wallet.publicKey,
+        null,
+        9
+    );
+
+    const tokenAccount = await getOrCreateAssociatedTokenAccount(
+        connection,
+        wallet,
+        mint,
+        wallet.publicKey
+    );
+
+    await program.rpc.initialize(new web3.BN(1000000000 * 10 ** 9), {
+        accounts: {
+            mint: mint.publicKey,
+            tokenAccount: tokenAccount.address,
+            user: wallet.publicKey,
+            mintAuthority: wallet.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: web3.SystemProgram.programId,
+            rent: web3.SYSVAR_RENT_PUBKEY,
+        },
+        signers: [wallet]
+    });
+
+    await setAuthority(
+        connection,
+        wallet,
+        mint,
+        wallet.publicKey,
+        AuthorityType.MintTokens,
+        null
+    );
+
+    console.log("Token initialized with total supply and mint authority renounced");
+})();
